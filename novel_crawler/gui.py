@@ -7,7 +7,7 @@ from tkinter import filedialog, messagebox, ttk
 from urllib.parse import urlparse
 
 from .cli import _default_out_dir
-from .downloader import crawl
+from .downloader import crawl, get_highest_chapter, load_checkpoint
 
 LOG = logging.getLogger("novel_crawler")
 
@@ -25,8 +25,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Novel Crawler")
-        self.geometry("720x520")
-        self.minsize(600, 420)
+        self.geometry("740x540")
+        self.minsize(620, 440)
 
         self.events: queue.Queue = queue.Queue()
         self.stop_flag = threading.Event()
@@ -78,6 +78,8 @@ class App(tk.Tk):
         btns.grid(row=5, column=0, columnspan=4, sticky="w", **pad)
         self.start_btn = ttk.Button(btns, text="Bat dau", command=self._start)
         self.start_btn.pack(side="left", padx=(0, 8))
+        self.resume_btn = ttk.Button(btns, text="Tiep tuc (Resume)", command=self._resume)
+        self.resume_btn.pack(side="left", padx=(0, 8))
         self.stop_btn = ttk.Button(btns, text="Dung", command=self._stop, state="disabled")
         self.stop_btn.pack(side="left")
 
@@ -95,15 +97,61 @@ class App(tk.Tk):
         scroll.pack(side="right", fill="y")
 
     # ---- helpers ----
+    def _check_and_apply_checkpoint(self, out_dir: str) -> bool:
+        if not out_dir or not os.path.isdir(out_dir):
+            return False
+        cp = load_checkpoint(out_dir)
+        if cp and "next_url" in cp and "next_chapter" in cp:
+            self.url_var.set(cp["next_url"])
+            self.from_var.set(str(cp["next_chapter"]))
+            msg = f"Da khoi phuc tien do tu checkpoint: Chuong {cp['next_chapter']}"
+            self.status_var.set(msg)
+            self._append_log(f"[Checkpoint] {msg} -> {cp['next_url']}")
+            return True
+        highest = get_highest_chapter(out_dir)
+        if highest > 0:
+            next_chap = highest + 1
+            self.from_var.set(str(next_chap))
+            msg = f"Phat hien {highest} chuong da luu. San sang tai tu chuong {next_chap}."
+            self.status_var.set(msg)
+            self._append_log(f"[Resume] {msg}")
+            return True
+        return False
+
+    def _resume(self):
+        out_dir = self.out_var.get().strip()
+        if not out_dir:
+            url = self.url_var.get().strip()
+            if url and urlparse(url).netloc:
+                out_dir = os.path.abspath(_default_out_dir(url))
+                self.out_var.set(out_dir)
+        if not out_dir or not os.path.isdir(out_dir):
+            messagebox.showinfo("Thong bao", "Vui long chon 'Thu muc luu' truoc de kiem tra tien do.")
+            return
+        found = self._check_and_apply_checkpoint(out_dir)
+        if found:
+            messagebox.showinfo(
+                "Khoi phuc tien do",
+                f"Da nap thong tin chuong tiep theo ({self.from_var.get()}).\nBam 'Bat dau' de tiep tuc!",
+            )
+        else:
+            messagebox.showinfo(
+                "Khong tim thay checkpoint",
+                f"Khong tim thay checkpoint hoac file chuong nao trong thu muc:\n{out_dir}",
+            )
+
     def _suggest_out(self):
         url = self.url_var.get().strip()
         if url and not self.out_var.get().strip() and urlparse(url).netloc:
-            self.out_var.set(os.path.abspath(_default_out_dir(url)))
+            suggested = os.path.abspath(_default_out_dir(url))
+            self.out_var.set(suggested)
+            self._check_and_apply_checkpoint(suggested)
 
     def _browse(self):
         path = filedialog.askdirectory(title="Chon thu muc luu")
         if path:
             self.out_var.set(path)
+            self._check_and_apply_checkpoint(path)
 
     def _append_log(self, line: str):
         self.log_text.configure(state="normal")
@@ -113,6 +161,7 @@ class App(tk.Tk):
 
     def _set_running(self, running: bool):
         self.start_btn.configure(state="disabled" if running else "normal")
+        self.resume_btn.configure(state="disabled" if running else "normal")
         self.stop_btn.configure(state="normal" if running else "disabled")
 
     def _read_inputs(self):
