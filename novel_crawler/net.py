@@ -43,11 +43,20 @@ def is_allowed_by_robots(url: str) -> bool:
         rp = robotparser.RobotFileParser()
         rp.set_url(base + "/robots.txt")
         try:
-            rp.read()
+            # Fetch with our own User-Agent: urllib's default UA gets a 403 on many sites,
+            # and RobotFileParser.read() treats 403 as "disallow everything".
+            resp = requests.get(base + "/robots.txt", headers=DEFAULT_HEADERS, timeout=15)
         except Exception:
             # If robots.txt is unreachable, don't block the user over it.
             _robots_cache[base] = None
             return True
+        if resp.status_code in (401, 403):
+            rp.disallow_all = True
+        elif resp.status_code >= 400:
+            rp.allow_all = True
+        else:
+            resp.encoding = resp.encoding or "utf-8"
+            rp.parse(resp.text.splitlines())
         _robots_cache[base] = rp
     if rp is None:
         return True

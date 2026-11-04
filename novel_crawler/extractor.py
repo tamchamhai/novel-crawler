@@ -38,6 +38,8 @@ NEXT_KEYWORDS = [
 ]
 NEXT_KEYWORDS = [strip_accents(k) for k in NEXT_KEYWORDS]
 # Whole class/id tokens that mark a "next chapter" link.
+PREV_ATTR_TOKENS = {"prev", "previous", "back", "prev-chap", "prev_chap", "btn-prev"}
+PREV_TEXT_WORDS = {"truoc", "prev", "previous", "back"}
 NEXT_ATTR_TOKENS = {"next", "next-chap", "next_chap", "next-chapter", "btn-next", "nextchap"}
 
 
@@ -151,13 +153,17 @@ def find_next_link(html: str, base_url: str):
         text = strip_accents(a.get_text(strip=True).lower())
         class_tokens = {c.lower() for c in a.get("class", [])}
         ident = a.get("id", "").lower()
+        # Some sites tag the "previous" link with class="next"; never treat those as next.
+        if class_tokens & PREV_ATTR_TOKENS or any(word in text.split() for word in PREV_TEXT_WORDS):
+            continue
         # Match whole words/phrases only, so e.g. "Sau khi chet" is not a "next" link.
         text_match = text in NEXT_KEYWORDS or any(
             " " in keyword and keyword in text for keyword in NEXT_KEYWORDS
         )
         attr_match = bool(class_tokens & NEXT_ATTR_TOKENS) or ident in NEXT_ATTR_TOKENS
-        if text_match or attr_match:
+        if text_match:
+            return urljoin(base_url, href)  # text is the most reliable signal
+        if attr_match and best is None:
             best = urljoin(base_url, href)
-            break
 
     return best

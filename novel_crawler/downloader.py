@@ -131,6 +131,9 @@ def crawl(
             if not next_url or next_url == url:
                 LOG.info("Khong tim thay lien ket 'chuong sau', dung lai.")
                 break
+            if next_url in visited:
+                LOG.warning("Lien ket 'chuong sau' tro ve trang da crawl (%s), dung lai.", next_url)
+                break
             url = next_url
             idx += 1
             polite_sleep(delay + random.uniform(0, 0.5))
