@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from .cli import _default_out_dir
 from .downloader import crawl, get_highest_chapter, load_checkpoint
+from .tts import convert_chapters, engine_labels, scan_pending, voice_options
 
 LOG = logging.getLogger("novel_crawler")
 
@@ -25,8 +26,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Novel Crawler")
-        self.geometry("740x540")
-        self.minsize(620, 440)
+        self.geometry("740x620")
+        self.minsize(620, 520)
 
         self.events: queue.Queue = queue.Queue()
         self.stop_flag = threading.Event()
@@ -39,6 +40,14 @@ class App(tk.Tk):
         self.delay_var = tk.StringVar(value="1.5")
         self.ignore_robots_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="San sang.")
+        self._engines = engine_labels()
+        self.tts_method_var = tk.StringVar(value=self._engines[0][1])
+        self.tts_group_var = tk.StringVar(value="10")
+        self.tts_ref_var = tk.StringVar()
+        self.tts_voice_var = tk.StringVar()
+        self.tts_next_var = tk.StringVar()
+        self.tts_dir_var = tk.StringVar()
+        self.tts_out_var = tk.StringVar()
 
         self._build()
         handler = _QueueHandler(self.events)
@@ -50,8 +59,39 @@ class App(tk.Tk):
     # ---- layout ----
     def _build(self):
         pad = {"padx": 8, "pady": 4}
-        frm = ttk.Frame(self, padding=8)
-        frm.pack(fill="both", expand=True)
+        root = ttk.Frame(self, padding=8)
+        root.pack(fill="both", expand=True)
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(3, weight=1)
+
+        self.notebook = ttk.Notebook(root)
+        self.notebook.grid(row=0, column=0, sticky="ew")
+        crawl_tab = ttk.Frame(self.notebook, padding=8)
+        tts_tab = ttk.Frame(self.notebook, padding=8)
+        self.notebook.add(crawl_tab, text="Crawl chuong")
+        self.notebook.add(tts_tab, text="Text to Speech")
+        self._build_crawl_tab(crawl_tab, pad)
+        self._build_tts_tab(tts_tab, pad)
+
+        # shared status area
+        bar = ttk.Frame(root)
+        bar.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        bar.columnconfigure(0, weight=1)
+        self.progress = ttk.Progressbar(bar, mode="determinate")
+        self.progress.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.stop_btn = ttk.Button(bar, text="Dung", command=self._stop, state="disabled")
+        self.stop_btn.grid(row=0, column=1)
+        ttk.Label(root, textvariable=self.status_var).grid(row=2, column=0, sticky="w", pady=4)
+
+        log_frame = ttk.Frame(root)
+        log_frame.grid(row=3, column=0, sticky="nsew")
+        self.log_text = tk.Text(log_frame, height=10, state="disabled", wrap="word")
+        scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=scroll.set)
+        self.log_text.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+    def _build_crawl_tab(self, frm, pad):
         frm.columnconfigure(1, weight=1)
 
         ttk.Label(frm, text="URL truyen / chuong:").grid(row=0, column=0, sticky="w", **pad)
@@ -79,22 +119,62 @@ class App(tk.Tk):
         self.start_btn = ttk.Button(btns, text="Bat dau", command=self._start)
         self.start_btn.pack(side="left", padx=(0, 8))
         self.resume_btn = ttk.Button(btns, text="Tiep tuc (Resume)", command=self._resume)
-        self.resume_btn.pack(side="left", padx=(0, 8))
-        self.stop_btn = ttk.Button(btns, text="Dung", command=self._stop, state="disabled")
-        self.stop_btn.pack(side="left")
+        self.resume_btn.pack(side="left")
 
-        self.progress = ttk.Progressbar(frm, mode="determinate")
-        self.progress.grid(row=6, column=0, columnspan=4, sticky="ew", **pad)
-        ttk.Label(frm, textvariable=self.status_var).grid(row=7, column=0, columnspan=4, sticky="w", **pad)
+    def _build_tts_tab(self, frm, pad):
+        frm.columnconfigure(1, weight=1)
 
-        log_frame = ttk.Frame(frm)
-        log_frame.grid(row=8, column=0, columnspan=4, sticky="nsew", **pad)
-        frm.rowconfigure(8, weight=1)
-        self.log_text = tk.Text(log_frame, height=10, state="disabled", wrap="word")
-        scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=scroll.set)
-        self.log_text.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+        ttk.Label(frm, text="Thu muc chua chuong (.txt):").grid(row=0, column=0, sticky="w", **pad)
+        ttk.Entry(frm, textvariable=self.tts_dir_var).grid(row=0, column=1, sticky="ew", **pad)
+        ttk.Button(frm, text="Chon...", command=self._browse_tts_dir).grid(row=0, column=2, **pad)
+
+        ttk.Label(frm, text="Thu muc luu audio:").grid(row=1, column=0, sticky="w", **pad)
+        ttk.Entry(frm, textvariable=self.tts_out_var).grid(row=1, column=1, sticky="ew", **pad)
+        ttk.Button(frm, text="Chon...", command=self._browse_tts_out).grid(row=1, column=2, **pad)
+
+        ttk.Label(frm, text="Phuong phap:").grid(row=2, column=0, sticky="w", **pad)
+        self.tts_combo = ttk.Combobox(
+            frm, textvariable=self.tts_method_var, state="readonly", values=[lbl for _k, lbl in self._engines]
+        )
+        self.tts_combo.grid(row=2, column=1, columnspan=2, sticky="ew", **pad)
+
+        ttk.Label(frm, text="So chuong / 1 file mp3:").grid(row=3, column=0, sticky="w", **pad)
+        ttk.Spinbox(frm, from_=1, to=1000, textvariable=self.tts_group_var, width=8).grid(
+            row=3, column=1, sticky="w", **pad
+        )
+
+        # voice selector (edge-tts voices / viXTTS sample voices); hidden for engines without a choice
+        self.voice_widgets = [
+            ttk.Label(frm, text="Giong doc:"),
+            ttk.Combobox(frm, textvariable=self.tts_voice_var, state="readonly"),
+        ]
+        self.voice_combo = self.voice_widgets[1]
+        self.voice_widgets[0].grid(row=4, column=0, sticky="w", **pad)
+        self.voice_combo.grid(row=4, column=1, columnspan=2, sticky="ew", **pad)
+
+        self.ref_widgets = [
+            ttk.Label(frm, text="Hoac file giong mau .wav rieng:"),
+            ttk.Entry(frm, textvariable=self.tts_ref_var),
+            ttk.Button(frm, text="Chon...", command=self._browse_ref),
+        ]
+        self.ref_widgets[0].grid(row=5, column=0, sticky="w", **pad)
+        self.ref_widgets[1].grid(row=5, column=1, sticky="ew", **pad)
+        self.ref_widgets[2].grid(row=5, column=2, **pad)
+        self.tts_combo.bind("<<ComboboxSelected>>", lambda _e: self._toggle_ref())
+        self._toggle_ref()
+
+        self.tts_btn = ttk.Button(frm, text="Chuyen sang audio (tu dong tiep tuc)", command=self._start_tts)
+        self.tts_btn.grid(row=6, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Label(frm, textvariable=self.tts_next_var, foreground="#1a5fb4", wraplength=620, justify="left").grid(
+            row=7, column=0, columnspan=3, sticky="w", **pad
+        )
+        ttk.Label(
+            frm,
+            text="Tu dong bo qua cac chuong da chuyen (theo ten file AAAA-BBBB_*.mp3 trong thu muc audio).",
+            foreground="gray",
+        ).grid(row=8, column=0, columnspan=3, sticky="w", **pad)
+        for entry_var in (self.tts_dir_var, self.tts_out_var):  # re-scan whenever a path changes
+            entry_var.trace_add("write", lambda *_a: self._show_tts_progress())
 
     # ---- helpers ----
     def _check_and_apply_checkpoint(self, out_dir: str) -> bool:
@@ -153,6 +233,56 @@ class App(tk.Tk):
             self.out_var.set(path)
             self._check_and_apply_checkpoint(path)
 
+    def _current_engine_key(self) -> str:
+        return next((k for k, lbl in self._engines if lbl == self.tts_method_var.get()), "")
+
+    def _toggle_ref(self):
+        key = self._current_engine_key()
+        voices = voice_options(key)
+        self._voice_values = [v for v, _l in voices]
+        self.voice_combo.configure(values=[lbl for _v, lbl in voices])
+        if voices:
+            self.tts_voice_var.set(voices[0][1])  # default = first entry of the engine's list
+        for w in self.voice_widgets:
+            w.grid() if voices else w.grid_remove()
+        for w in self.ref_widgets:  # custom .wav only makes sense for the cloning engine
+            w.grid() if key == "vixtts" else w.grid_remove()
+
+    def _browse_tts_dir(self):
+        path = filedialog.askdirectory(title="Chon thu muc chua chuong")
+        if path:
+            self.tts_dir_var.set(path)
+            if not self.tts_out_var.get().strip():
+                self.tts_out_var.set(os.path.join(path, "audio"))
+            self._show_tts_progress()
+
+    def _browse_tts_out(self):
+        path = filedialog.askdirectory(title="Chon thu muc luu audio")
+        if path:
+            self.tts_out_var.set(path)
+            self._show_tts_progress()
+
+    def _scan_text(self, src_dir: str, out_dir: str) -> tuple[str, int | None]:
+        last, nxt, pending = scan_pending(src_dir, out_dir)
+        if not os.path.isdir(src_dir):
+            return "Chua chon thu muc chua chuong.", None
+        if nxt is None:
+            return (f"Da chuyen toi chuong {last}. Khong con chuong moi." if last else "Khong co file chuong .txt."), None
+        if last:
+            return f"Da chuyen toi chuong {last} -> se bat dau tu chuong {nxt} ({pending} chuong cho).", nxt
+        return f"Chua co audio nao -> se bat dau tu chuong dau tien (chuong {nxt}, {pending} chuong cho).", nxt
+
+    def _show_tts_progress(self):
+        src = self.tts_dir_var.get().strip() or self.out_var.get().strip()
+        out = self.tts_out_var.get().strip() or (os.path.join(src, "audio") if src else "")
+        text, _nxt = self._scan_text(src, out)
+        self.tts_next_var.set(text)
+
+    def _browse_ref(self):
+        path = filedialog.askopenfilename(title="Chon giong mau", filetypes=[("WAV", "*.wav")])
+        if path:
+            self.tts_ref_var.set(path)
+
     def _append_log(self, line: str):
         self.log_text.configure(state="normal")
         self.log_text.insert("end", line + "\n")
@@ -162,6 +292,7 @@ class App(tk.Tk):
     def _set_running(self, running: bool):
         self.start_btn.configure(state="disabled" if running else "normal")
         self.resume_btn.configure(state="disabled" if running else "normal")
+        self.tts_btn.configure(state="disabled" if running else "normal")
         self.stop_btn.configure(state="normal" if running else "disabled")
 
     def _read_inputs(self):
@@ -226,13 +357,71 @@ class App(tk.Tk):
         self.worker = threading.Thread(target=run, daemon=True)
         self.worker.start()
 
+    def _start_tts(self):
+        src_dir = self.tts_dir_var.get().strip() or self.out_var.get().strip()
+        if not src_dir or not os.path.isdir(src_dir):
+            messagebox.showerror(
+                "Du lieu khong hop le",
+                "Thu muc chua chuong khong ton tai. Hay crawl truoc hoac chon thu muc chua file chuong .txt.",
+            )
+            return
+        audio_dir = self.tts_out_var.get().strip() or os.path.join(src_dir, "audio")
+        self.tts_dir_var.set(src_dir)
+        self.tts_out_var.set(audio_dir)
+
+        # scan the output folder first: where do we continue?
+        text, nxt = self._scan_text(src_dir, audio_dir)
+        self.tts_next_var.set(text)
+        self._append_log(f"[Quet audio] {text}")
+        if nxt is None:
+            self.status_var.set(text)
+            messagebox.showinfo("Khong co chuong moi", text)
+            return
+        try:
+            group = int(self.tts_group_var.get().strip())
+            if group < 1:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Du lieu khong hop le", "'So chuong / 1 file mp3' phai la so nguyen >= 1.")
+            return
+        label = self.tts_method_var.get()
+        key = next(k for k, lbl in self._engines if lbl == label)
+        ref = self.tts_ref_var.get().strip() if key == "vixtts" else ""
+        voice = ""
+        labels = [lbl for _v, lbl in voice_options(key)]
+        if self.tts_voice_var.get() in labels:
+            voice = voice_options(key)[labels.index(self.tts_voice_var.get())][0]
+
+        self.stop_flag.clear()
+        self.progress.configure(value=0, maximum=100, mode="indeterminate")
+        self.progress.start(15)
+        self.status_var.set(f"Dang chuyen sang audio, bat dau tu chuong {nxt}...")
+        self._set_running(True)
+
+        def progress(done, total, message):
+            self.events.put(("progress", (done, total, message)))
+
+        def run():
+            try:
+                outs = convert_chapters(
+                    key, src_dir, audio_dir, group, reference_wav=ref, voice=voice,
+                    progress=progress, should_stop=self.stop_flag.is_set,
+                )
+                self.events.put(("tts_done", (len(outs), audio_dir)))
+            except Exception as exc:
+                self.events.put(("error", str(exc)))
+
+        self.worker = threading.Thread(target=run, daemon=True)
+        self.worker.start()
+
     def _stop(self):
         self.stop_flag.set()
         self.status_var.set("Dang dung sau chuong hien tai...")
         self.stop_btn.configure(state="disabled")
 
-    def _finish(self, status: str):
+    def _finish(self, status: str, ok: bool = True):
         self.progress.stop()
+        self.progress.configure(mode="determinate", maximum=100, value=100 if ok else 0)
         self._set_running(False)
         self.status_var.set(status)
 
@@ -249,9 +438,18 @@ class App(tk.Tk):
                         self.progress.configure(mode="determinate", maximum=total, value=done)
                     self.status_var.set(message)
                 elif kind == "done":
+                    self.tts_dir_var.set(self.out_var.get())
+                    self.tts_out_var.set(os.path.join(self.out_var.get(), "audio"))
                     self._finish(f"Hoan tat. Da luu {data} chuong vao: {self.out_var.get()}")
+                elif kind == "tts_done":
+                    self._show_tts_progress()
+                    if data[0]:
+                        self._finish(f"Hoan tat TTS. Da tao {data[0]} file audio trong: {data[1]}")
+                    else:
+                        self._finish("Khong co chuong moi can chuyen (hoac da dung truoc khi xong file dau tien).")
                 elif kind == "error":
-                    self._finish("Loi.")
+                    self._append_log(f"[LOI] {data}")
+                    self._finish(f"Loi: {data}", ok=False)
                     messagebox.showerror("Loi", data)
         except queue.Empty:
             pass
