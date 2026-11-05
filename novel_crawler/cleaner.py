@@ -39,11 +39,18 @@ JUNK_LINE_PATTERNS = [
     r"Toái Càn Khôn",
     r"Bạch Sầu",
     r"Trương gia đại thiếu",
+    r"-?\s*www\.?",
+    r"(?:…|\.\.\.)?\s*(?:đọc truyện online mới nhất ở|nguồn|truyện được lấy tại|xem tại)\s+truyenfull(?:\.vn|\.com|\.live|\.cc)?\.?",
+    r"(?:truyen\s*full[\w.]*(?:(?:\s*|\.)(?:vn|live|cc|com|net|org))?\s*[,.]?\s*)+",
 ]
 _JUNK_RE = re.compile(r"^(?:%s)$" % "|".join(JUNK_LINE_PATTERNS), re.IGNORECASE)
 
 # ads glued inside a sentence
 INLINE_JUNK = [
+    re.compile(r"\s*(?:truyện được lấy tại|xem tại|nguồn|đọc truyện online mới nhất ở)\s+truyenfull(?:\.vn|\.com|\.live|\.cc)?\.?", re.IGNORECASE),
+    re.compile(r"\s*(?:truyen\s*full[\w.]*(?:(?:\s*|\.)(?:vn|live|cc|com|net|org))?\s*[,.]?\s*)+\.?\s*$", re.IGNORECASE),
+    re.compile(r"\(?\s*(?:www\.)?\s*truyen\s*full[\w.]*(?:(?:\s*|\.)(?:vn|live|cc|com|net|org))?\s*\)?", re.IGNORECASE),
+    re.compile(r"\s*qua\s+truyenfull(?:\.vn|\.com)?", re.IGNORECASE),
     re.compile(r"\s*Truyện được copy từ[^.\n]*?Com\.?", re.IGNORECASE),
     re.compile(r"\[\s*truyen cua tui[^\]]*\]", re.IGNORECASE),
     re.compile(r"\s*(?:Nguồn:\s*|đăng nhập\s*)?https?:\s*//\S*(?:\s*để đọc\s*truyện)?", re.IGNORECASE),
@@ -224,6 +231,17 @@ def clean_text(raw: str, name: str = "") -> str:
             piece = _punctuate(piece)
             if re.search(r"\w", piece):
                 paragraphs.append(piece)
+
+    # Strip any trailing watermark lines at the end of chapter
+    while paragraphs:
+        last_p = paragraphs[-1].strip().lower()
+        if re.match(r"^(?:truyen\s*full[\w.]*(?:(?:\s*|\.)(?:vn|live|cc|com|net|org))?\s*[,.]?\s*)+$", last_p):
+            paragraphs.pop()
+        elif re.match(r"^(?:-?\s*www\.?|(?:…|\.\.\.)?\s*(?:đọc truyện online mới nhất ở|nguồn|truyện được lấy tại|xem tại)\s+truyenfull.*)$", last_p):
+            paragraphs.pop()
+        else:
+            break
+
     body = "\n\n".join(paragraphs)
     return (title + "\n\n" + body if title else body).rstrip() + "\n"
 
