@@ -5,3 +5,4 @@ venv/
 novels/
 *.log
 .venv312/
+.vscode/
