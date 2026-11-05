@@ -59,6 +59,7 @@ class App(tk.Tk):
         ]
         self.auto_tts_engine_var = tk.StringVar(value=self._pipe_engines[0][1])
         self.auto_tts_voice_var = tk.StringVar()
+        self.auto_tts_out_var = tk.StringVar()
 
         self._engines = engine_labels()
         self.tts_method_var = tk.StringVar(value=self._engines[0][1])
@@ -152,23 +153,30 @@ class App(tk.Tk):
             command=self._toggle_pipeline_tts,
         ).grid(row=1, column=0, columnspan=4, sticky="w", padx=4, pady=3)
 
+        self.pipe_out_lbl = ttk.Label(pipe_box, text="Thu muc luu audio MP3:")
+        self.pipe_out_lbl.grid(row=2, column=0, sticky="w", padx=4, pady=2)
+        self.pipe_out_entry = ttk.Entry(pipe_box, textvariable=self.auto_tts_out_var)
+        self.pipe_out_entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=4, pady=2)
+        self.pipe_out_btn = ttk.Button(pipe_box, text="Chon...", command=self._browse_pipeline_audio_out)
+        self.pipe_out_btn.grid(row=2, column=3, padx=4, pady=2)
+
         self.pipe_batch_lbl = ttk.Label(pipe_box, text="Batch chuong / 1 file MP3:")
-        self.pipe_batch_lbl.grid(row=2, column=0, sticky="w", padx=4, pady=2)
+        self.pipe_batch_lbl.grid(row=3, column=0, sticky="w", padx=4, pady=2)
         self.pipe_batch_spin = ttk.Spinbox(pipe_box, from_=1, to=1000, textvariable=self.auto_tts_batch_var, width=8)
-        self.pipe_batch_spin.grid(row=2, column=1, sticky="w", padx=4, pady=2)
+        self.pipe_batch_spin.grid(row=3, column=1, sticky="w", padx=4, pady=2)
 
         self.pipe_eng_lbl = ttk.Label(pipe_box, text="Engine TTS:")
-        self.pipe_eng_lbl.grid(row=3, column=0, sticky="w", padx=4, pady=2)
+        self.pipe_eng_lbl.grid(row=4, column=0, sticky="w", padx=4, pady=2)
         self.pipe_eng_combo = ttk.Combobox(
             pipe_box, textvariable=self.auto_tts_engine_var, state="readonly", values=[lbl for _k, lbl in self._pipe_engines]
         )
-        self.pipe_eng_combo.grid(row=3, column=1, columnspan=3, sticky="ew", padx=4, pady=2)
+        self.pipe_eng_combo.grid(row=4, column=1, columnspan=3, sticky="ew", padx=4, pady=2)
         self.pipe_eng_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_pipe_engine_changed())
 
         self.pipe_voice_lbl = ttk.Label(pipe_box, text="Giong doc:")
-        self.pipe_voice_lbl.grid(row=4, column=0, sticky="w", padx=4, pady=2)
+        self.pipe_voice_lbl.grid(row=5, column=0, sticky="w", padx=4, pady=2)
         self.pipe_voice_combo = ttk.Combobox(pipe_box, textvariable=self.auto_tts_voice_var, state="readonly")
-        self.pipe_voice_combo.grid(row=4, column=1, columnspan=3, sticky="ew", padx=4, pady=2)
+        self.pipe_voice_combo.grid(row=5, column=1, columnspan=3, sticky="ew", padx=4, pady=2)
 
         self._on_pipe_engine_changed()
         self._toggle_pipeline_tts()
@@ -284,13 +292,22 @@ class App(tk.Tk):
         if url and not self.out_var.get().strip() and urlparse(url).netloc:
             suggested = os.path.abspath(_default_out_dir(url))
             self.out_var.set(suggested)
+            if not self.auto_tts_out_var.get().strip():
+                self.auto_tts_out_var.set(os.path.join(suggested, "audio"))
             self._check_and_apply_checkpoint(suggested)
 
     def _browse(self):
-        path = filedialog.askdirectory(title="Chon thu muc luu")
+        path = filedialog.askdirectory(title="Chon thu muc luu chuong")
         if path:
             self.out_var.set(path)
+            if not self.auto_tts_out_var.get().strip():
+                self.auto_tts_out_var.set(os.path.join(path, "audio"))
             self._check_and_apply_checkpoint(path)
+
+    def _browse_pipeline_audio_out(self):
+        path = filedialog.askdirectory(title="Chon thu muc luu file audio MP3")
+        if path:
+            self.auto_tts_out_var.set(path)
 
     def _current_pipe_engine_key(self) -> str:
         label = self.auto_tts_engine_var.get()
@@ -307,9 +324,15 @@ class App(tk.Tk):
     def _toggle_pipeline_tts(self):
         enabled = self.auto_tts_var.get()
         state = "normal" if enabled else "disabled"
+        self.pipe_out_entry.configure(state=state)
+        self.pipe_out_btn.configure(state=state)
         self.pipe_batch_spin.configure(state=state)
         self.pipe_eng_combo.configure(state="readonly" if enabled else "disabled")
         self.pipe_voice_combo.configure(state="readonly" if enabled else "disabled")
+        if enabled and not self.auto_tts_out_var.get().strip():
+            out = self.out_var.get().strip()
+            if out:
+                self.auto_tts_out_var.set(os.path.join(out, "audio"))
 
     def _current_engine_key(self) -> str:
         return next((k for k, lbl in self._engines if lbl == self.tts_method_var.get()), "")
@@ -424,7 +447,8 @@ class App(tk.Tk):
             voice_label = self.auto_tts_voice_var.get()
             voices = voice_options(engine_key)
             voice_val = next((v for v, lbl in voices if lbl == voice_label), "")
-            audio_dir = os.path.join(out_dir, "audio")
+            audio_dir = self.auto_tts_out_var.get().strip() or os.path.join(out_dir, "audio")
+            self.auto_tts_out_var.set(audio_dir)
             pipe_worker = PipelineTTSWorker(
                 engine_key=engine_key,
                 out_dir=audio_dir,
