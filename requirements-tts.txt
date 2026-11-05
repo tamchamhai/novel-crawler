@@ -1,0 +1,15 @@
+# Optional TTS dependencies. Use Python 3.12 (.venv312): piper/onnxruntime/coqui-tts do not support 3.15.
+#   py -3.12 -m venv .venv312 && .venv312\Scripts\pip install -r requirements.txt -r requirements-tts.txt
+lameenc>=1.7          # encode MP3 (all methods; without it output is .wav)
+pyttsx3>=2.90         # method 1: pyttsx3 (Windows SAPI5)
+piper-tts>=1.2        # method 2: Piper
+numpy
+torch                 # method 3 (VITS/MMS) and 4 (viXTTS)
+torchaudio
+torchcodec
+transformers>=4.40    # method 3: VITS
+coqui-tts             # method 4: viXTTS
+six
+huggingface_hub       # method 4: viXTTS model download
+edge-tts>=6.1        # method 5: edge-tts (online)
+soundfile            # method 5: decode edge-tts mp3
