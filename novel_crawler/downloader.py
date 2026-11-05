@@ -99,11 +99,21 @@ def fetch_with_retry(
             delay = min(delay * 1.5, 30.0)
 
 
-def _save_chapter(out_dir: str, index: int, title: str, content: str) -> str:
+def _save_chapter(out_dir: str, index: int, title: str, content: str, clean: bool = False) -> str:
     filename = f"{index:04d}_{sanitize_filename(title)}.txt"
     path = os.path.join(out_dir, filename)
+    raw = title + "\n\n" + content
+    if clean:
+        try:
+            from .cleaner import clean_text
+            text = clean_text(raw, filename)
+        except Exception as exc:
+            LOG.warning("Khong the lam sach van ban chuong %d: %s", index, exc)
+            text = raw
+    else:
+        text = raw
     with open(path, "w", encoding="utf-8") as f:
-        f.write(title + "\n\n" + content)
+        f.write(text)
     return path
 
 
@@ -142,6 +152,8 @@ def crawl(
     end_chapter: int = None,
     progress=None,
     should_stop=None,
+    clean: bool = False,
+    on_chapter_saved=None,
 ):
     """Crawl chapters [start_chapter, end_chapter] (1-based, inclusive).
 
@@ -203,9 +215,14 @@ def crawl(
                 LOG.warning("Bo qua chuong %d (%s) sau khi thu lai that bai: %s", idx, url, exc)
                 continue
             final_title = title if title and title != "Untitled" else list_title
-            path = _save_chapter(out_dir, idx, final_title, content)
+            path = _save_chapter(out_dir, idx, final_title, content, clean=clean)
             LOG.info("[%d/%d] Da luu: %s", idx, last, path)
             saved += 1
+            if on_chapter_saved:
+                try:
+                    on_chapter_saved(idx, path)
+                except Exception as exc:
+                    LOG.warning("Loi on_chapter_saved chuong %d: %s", idx, exc)
             report(saved, total, f"Da luu chuong {idx}: {final_title}")
             polite_sleep(delay + random.uniform(0, 0.5))
     else:
@@ -239,9 +256,14 @@ def crawl(
                 break
 
             title, content = extract_chapter(html, url)
-            path = _save_chapter(out_dir, idx, title, content)
+            path = _save_chapter(out_dir, idx, title, content, clean=clean)
             LOG.info("[%d] Da luu: %s", idx, path)
             saved += 1
+            if on_chapter_saved:
+                try:
+                    on_chapter_saved(idx, path)
+                except Exception as exc:
+                    LOG.warning("Loi on_chapter_saved chuong %d: %s", idx, exc)
             report(saved, total, f"Da luu chuong {idx}: {title}")
             if end_chapter and idx >= end_chapter:
                 clear_checkpoint(out_dir)

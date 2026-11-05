@@ -8,7 +8,15 @@ from urllib.parse import urlparse
 
 from .cli import _default_out_dir
 from .downloader import crawl, get_highest_chapter, load_checkpoint
-from .tts import convert_chapters, engine_labels, scan_pending, voice_options
+from .tts import (
+    PipelineTTSWorker,
+    convert_chapters,
+    engine_labels,
+    last_converted_chapter,
+    list_chapter_files,
+    scan_pending,
+    voice_options,
+)
 
 LOG = logging.getLogger("novel_crawler")
 
@@ -26,8 +34,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Novel Crawler")
-        self.geometry("740x620")
-        self.minsize(620, 520)
+        self.geometry("760x720")
+        self.minsize(650, 580)
 
         self.events: queue.Queue = queue.Queue()
         self.stop_flag = threading.Event()
@@ -40,6 +48,18 @@ class App(tk.Tk):
         self.delay_var = tk.StringVar(value="1.5")
         self.ignore_robots_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="San sang.")
+
+        # Pipeline Auto-clean and TTS options
+        self.auto_clean_var = tk.BooleanVar(value=True)
+        self.auto_tts_var = tk.BooleanVar(value=False)
+        self.auto_tts_batch_var = tk.StringVar(value="20")
+        self._pipe_engines = [
+            ("vixtts", "viXTTS (XTTS tieng Viet, dung GPU RTX 5060)"),
+            ("edge", "edge-tts (online, giong Microsoft)"),
+        ]
+        self.auto_tts_engine_var = tk.StringVar(value=self._pipe_engines[0][1])
+        self.auto_tts_voice_var = tk.StringVar()
+
         self._engines = engine_labels()
         self.tts_method_var = tk.StringVar(value=self._engines[0][1])
         self.tts_group_var = tk.StringVar(value="10")
@@ -114,8 +134,47 @@ class App(tk.Tk):
             row=4, column=2, columnspan=2, sticky="w", **pad
         )
 
+        # Pipeline Auto-clean and TTS options
+        pipe_box = ttk.LabelFrame(frm, text="Che do tu dong (Auto-Clean & Pipeline TTS)", padding=8)
+        pipe_box.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(6, 6))
+        pipe_box.columnconfigure(1, weight=1)
+
+        ttk.Checkbutton(
+            pipe_box,
+            text="Tu dong lam sach van ban (loc rac, bo trung tieu de truoc khi luu/TTS)",
+            variable=self.auto_clean_var,
+        ).grid(row=0, column=0, columnspan=4, sticky="w", padx=4, pady=3)
+
+        ttk.Checkbutton(
+            pipe_box,
+            text="Vua crawl vua tao Audio TTS (tich luy du batch thi xuat file MP3)",
+            variable=self.auto_tts_var,
+            command=self._toggle_pipeline_tts,
+        ).grid(row=1, column=0, columnspan=4, sticky="w", padx=4, pady=3)
+
+        self.pipe_batch_lbl = ttk.Label(pipe_box, text="Batch chuong / 1 file MP3:")
+        self.pipe_batch_lbl.grid(row=2, column=0, sticky="w", padx=4, pady=2)
+        self.pipe_batch_spin = ttk.Spinbox(pipe_box, from_=1, to=1000, textvariable=self.auto_tts_batch_var, width=8)
+        self.pipe_batch_spin.grid(row=2, column=1, sticky="w", padx=4, pady=2)
+
+        self.pipe_eng_lbl = ttk.Label(pipe_box, text="Engine TTS:")
+        self.pipe_eng_lbl.grid(row=3, column=0, sticky="w", padx=4, pady=2)
+        self.pipe_eng_combo = ttk.Combobox(
+            pipe_box, textvariable=self.auto_tts_engine_var, state="readonly", values=[lbl for _k, lbl in self._pipe_engines]
+        )
+        self.pipe_eng_combo.grid(row=3, column=1, columnspan=3, sticky="ew", padx=4, pady=2)
+        self.pipe_eng_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_pipe_engine_changed())
+
+        self.pipe_voice_lbl = ttk.Label(pipe_box, text="Giong doc:")
+        self.pipe_voice_lbl.grid(row=4, column=0, sticky="w", padx=4, pady=2)
+        self.pipe_voice_combo = ttk.Combobox(pipe_box, textvariable=self.auto_tts_voice_var, state="readonly")
+        self.pipe_voice_combo.grid(row=4, column=1, columnspan=3, sticky="ew", padx=4, pady=2)
+
+        self._on_pipe_engine_changed()
+        self._toggle_pipeline_tts()
+
         btns = ttk.Frame(frm)
-        btns.grid(row=5, column=0, columnspan=4, sticky="w", **pad)
+        btns.grid(row=6, column=0, columnspan=4, sticky="w", **pad)
         self.start_btn = ttk.Button(btns, text="Bat dau", command=self._start)
         self.start_btn.pack(side="left", padx=(0, 8))
         self.resume_btn = ttk.Button(btns, text="Tiep tuc (Resume)", command=self._resume)
@@ -233,6 +292,25 @@ class App(tk.Tk):
             self.out_var.set(path)
             self._check_and_apply_checkpoint(path)
 
+    def _current_pipe_engine_key(self) -> str:
+        label = self.auto_tts_engine_var.get()
+        return next((k for k, lbl in self._pipe_engines if lbl == label), "vixtts")
+
+    def _on_pipe_engine_changed(self):
+        key = self._current_pipe_engine_key()
+        voices = voice_options(key)
+        labels = [lbl for _v, lbl in voices]
+        self.pipe_voice_combo.configure(values=labels)
+        if labels:
+            self.auto_tts_voice_var.set(labels[0])
+
+    def _toggle_pipeline_tts(self):
+        enabled = self.auto_tts_var.get()
+        state = "normal" if enabled else "disabled"
+        self.pipe_batch_spin.configure(state=state)
+        self.pipe_eng_combo.configure(state="readonly" if enabled else "disabled")
+        self.pipe_voice_combo.configure(state="readonly" if enabled else "disabled")
+
     def _current_engine_key(self) -> str:
         return next((k for k, lbl in self._engines if lbl == self.tts_method_var.get()), "")
 
@@ -327,6 +405,36 @@ class App(tk.Tk):
             messagebox.showerror("Du lieu khong hop le", str(exc))
             return
         self.out_var.set(out_dir)
+
+        clean = self.auto_clean_var.get()
+        auto_tts = self.auto_tts_var.get()
+        batch_size = 20
+        if auto_tts:
+            try:
+                batch_size = int(self.auto_tts_batch_var.get().strip())
+                if batch_size < 1:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror("Du lieu khong hop le", "Batch chuong / 1 file mp3 phai la so nguyen >= 1.")
+                return
+
+        pipe_worker = None
+        if auto_tts:
+            engine_key = self._current_pipe_engine_key()
+            voice_label = self.auto_tts_voice_var.get()
+            voices = voice_options(engine_key)
+            voice_val = next((v for v, lbl in voices if lbl == voice_label), "")
+            audio_dir = os.path.join(out_dir, "audio")
+            pipe_worker = PipelineTTSWorker(
+                engine_key=engine_key,
+                out_dir=audio_dir,
+                batch_size=batch_size,
+                voice=voice_val,
+                progress=lambda d, t, m: self.events.put(("pipe_progress", (d, t, m))),
+                log=lambda m: self.events.put(("log", m)),
+                should_stop=self.stop_flag.is_set,
+            )
+
         self.stop_flag.clear()
         self.progress.configure(value=0, maximum=100, mode="indeterminate")
         self.progress.start(15)
@@ -340,6 +448,14 @@ class App(tk.Tk):
 
         def run():
             try:
+                if pipe_worker:
+                    existing = list_chapter_files(out_dir) if os.path.isdir(out_dir) else []
+                    last_done = last_converted_chapter(pipe_worker.out_dir)
+                    unconverted = [c for c in existing if c[0] > last_done]
+                    pipe_worker.start(initial_chapters=unconverted)
+
+                on_saved = pipe_worker.add_chapter if pipe_worker else None
+
                 saved = crawl(
                     start_url=url,
                     out_dir=out_dir,
@@ -349,9 +465,22 @@ class App(tk.Tk):
                     ignore_robots=ignore_robots,
                     progress=progress,
                     should_stop=self.stop_flag.is_set,
+                    clean=clean,
+                    on_chapter_saved=on_saved,
                 )
-                self.events.put(("done", saved))
+
+                if pipe_worker:
+                    pipe_worker.finish_crawler()
+                    self.events.put(("log", "[TTS Pipeline] Crawler da xong, dang doi TTS hoan tat cac chuong con lai..."))
+                    pipe_worker.join()
+                    audio_count = len(pipe_worker.created_files)
+                    self.events.put(("done", (saved, audio_count, pipe_worker.out_dir)))
+                else:
+                    self.events.put(("done", (saved, 0, out_dir)))
+
             except Exception as exc:  # surface any failure in the UI instead of a silent thread death
+                if pipe_worker:
+                    pipe_worker.stop()
                 self.events.put(("error", str(exc)))
 
         self.worker = threading.Thread(target=run, daemon=True)
@@ -438,9 +567,16 @@ class App(tk.Tk):
                         self.progress.configure(mode="determinate", maximum=total, value=done)
                     self.status_var.set(message)
                 elif kind == "done":
+                    saved, audio_count, target_dir = data
                     self.tts_dir_var.set(self.out_var.get())
                     self.tts_out_var.set(os.path.join(self.out_var.get(), "audio"))
-                    self._finish(f"Hoan tat. Da luu {data} chuong vao: {self.out_var.get()}")
+                    if audio_count:
+                        self._finish(f"Hoan tat. Da luu {saved} chuong va tao {audio_count} file MP3 trong: {target_dir}")
+                    else:
+                        self._finish(f"Hoan tat. Da luu {saved} chuong vao: {self.out_var.get()}")
+                elif kind == "pipe_progress":
+                    done, total, message = data
+                    self.status_var.set(f"[TTS Pipeline] {message}")
                 elif kind == "tts_done":
                     self._show_tts_progress()
                     if data[0]:

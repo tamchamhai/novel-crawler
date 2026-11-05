@@ -60,7 +60,10 @@ INLINE_JUNK = [
 # stray symbols / emoticons
 _STRAY_RE = re.compile(r"\^[_\-.]?\^|[\^~_*=¬#`■❤❊‼°‎​‌‍﻿@]+")
 
-TITLE_RE = re.compile(r"^(?:Thiếu Gia Bị Bỏ Rơi)?\s*(Chương\s+(\d+))\s*[:：\-–.]?\s*(.*?)\s*$", re.IGNORECASE)
+TITLE_RE = re.compile(
+    r"^(?:(?:Thiếu\s*Gia\s*Bị\s*Bỏ\s*Rơi)\s*)?(Chương\s*(\d+))\s*[:：\-–.]?\s*(.*?)\s*$",
+    re.IGNORECASE,
+)
 
 # ---------------------------------------------------------------- punctuation
 UPPER = "A-ZÀ-ỸĐ"

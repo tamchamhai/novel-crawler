@@ -6,8 +6,10 @@ to WAV when it is not installed).
 """
 import logging
 import os
+import queue
 import re
 import tempfile
+import threading
 import wave
 
 LOG = logging.getLogger("novel_crawler")
@@ -570,6 +572,200 @@ def scan_pending(src_dir: str, out_dir: str) -> tuple[int, int | None, int]:
     return last_done, (pending[0] if pending else None), len(pending)
 
 
+def render_batch(
+    engine: Engine,
+    group: list[tuple[int, str]],
+    out_dir: str,
+    tmp_dir: str,
+    progress=None,
+    should_stop=None,
+) -> str | None:
+    """Render a group of chapters into a single audio file (MP3 or WAV)."""
+    if not group:
+        return None
+    report = progress or (lambda d, t, m: None)
+    stopped = should_stop or (lambda: False)
+
+    first, last = group[0][0], group[-1][0]
+    chapter_wavs: list[str] = []
+    total_chapters = len(group)
+
+    for c_idx, (idx, path) in enumerate(group):
+        if stopped():
+            raise Cancelled
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        chunks = split_text(text, engine.max_chars, engine.merge_chunks)
+        chunk_wavs = []
+        for n, chunk in enumerate(chunks):
+            if stopped():
+                raise Cancelled
+            wp = os.path.join(tmp_dir, f"{idx:04d}_{n:05d}.wav")
+            try:
+                engine.synth(chunk, wp)
+            except (Cancelled, TTSFatal):
+                raise
+            except Exception as exc:
+                LOG.warning("Chuong %s doan %s loi (%s), bo qua: %.40r", idx, n + 1, exc, chunk)
+            if os.path.isfile(wp) and os.path.getsize(wp) > 44:
+                chunk_wavs.append(wp)
+            report(c_idx, total_chapters, f"Chuong {idx}: doan {n + 1}/{len(chunks)}")
+        if not chunk_wavs:
+            LOG.warning("Chuong %s khong tao duoc audio, bo qua.", idx)
+            continue
+        cw = os.path.join(tmp_dir, f"{idx:04d}.wav")
+        _concat_wavs(chunk_wavs, cw, pause=PAUSE_SECONDS)
+        for p in chunk_wavs:
+            if os.path.exists(p):
+                os.remove(p)
+        chapter_wavs.append(cw)
+        report(c_idx + 1, total_chapters, f"Xong chuong {idx}")
+
+    if not chapter_wavs:
+        return None
+
+    os.makedirs(out_dir, exist_ok=True)
+    base = os.path.join(out_dir, f"{first:04d}-{last:04d}_{engine.key}")
+    combined = os.path.join(tmp_dir, f"{first:04d}-{last:04d}.wav")
+    _concat_wavs(chapter_wavs, combined)
+    out_file = ""
+    if _wav_to_mp3(combined, base + ".mp3"):
+        out_file = base + ".mp3"
+    else:
+        LOG.warning("Chua cai lameenc (pip install lameenc) -> luu .wav thay vi .mp3.")
+        os.replace(combined, base + ".wav")
+        out_file = base + ".wav"
+
+    for p in chapter_wavs + [combined]:
+        if os.path.exists(p):
+            os.remove(p)
+    return out_file
+
+
+class PipelineTTSWorker:
+    """Consumes crawled chapter text files concurrently and batches them into MP3 audio."""
+
+    def __init__(
+        self,
+        engine_key: str,
+        out_dir: str,
+        batch_size: int = 20,
+        voice: str = "",
+        reference_wav: str = "",
+        progress=None,
+        log=None,
+        should_stop=None,
+    ):
+        self.engine_key = engine_key
+        self.out_dir = out_dir
+        self.batch_size = max(1, batch_size)
+        self.voice = voice
+        self.reference_wav = reference_wav
+        self.progress = progress or (lambda d, t, m: None)
+        self.log = log or (lambda msg: LOG.info(msg))
+        self.should_stop = should_stop or (lambda: False)
+
+        self._queue: queue.Queue = queue.Queue()
+        self._crawler_done = threading.Event()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.created_files: list[str] = []
+        self.error: Exception | None = None
+
+    def start(self, initial_chapters: list[tuple[int, str]] = None):
+        """Start the background consumer thread."""
+        if initial_chapters:
+            for item in initial_chapters:
+                self._queue.put(item)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def add_chapter(self, index: int, path: str):
+        """Called by crawler producer whenever a new chapter is saved."""
+        self._queue.put((index, path))
+
+    def finish_crawler(self):
+        """Called when crawler finishes downloading all chapters."""
+        self._crawler_done.set()
+
+    def stop(self):
+        """Request immediate stop."""
+        self._stop_event.set()
+
+    def join(self, timeout=None):
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+
+    def is_alive(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
+
+    def _is_stopped(self) -> bool:
+        return self._stop_event.is_set() or (self.should_stop and self.should_stop())
+
+    def _run(self):
+        os.makedirs(self.out_dir, exist_ok=True)
+        last_done = last_converted_chapter(self.out_dir)
+        engine = None
+        try:
+            self.log(f"[TTS Pipeline] Khoi tao engine '{self.engine_key}' tren nen...")
+            engine = create_engine(self.engine_key, self.reference_wav, self.voice)
+            engine.stop_check = self._is_stopped
+            engine.load()
+            self.log(
+                f"[TTS Pipeline] Engine {engine.label} da san sang. Dang cho gom du batch {self.batch_size} chuong de tao audio..."
+            )
+
+            pending: list[tuple[int, str]] = []
+            with tempfile.TemporaryDirectory(prefix="novel_pipeline_tts_") as tmp_dir:
+                while not self._is_stopped():
+                    try:
+                        item = self._queue.get(timeout=0.5)
+                        idx, path = item
+                        if idx > last_done:
+                            pending.append((idx, path))
+                        self._queue.task_done()
+                    except queue.Empty:
+                        if self._crawler_done.is_set():
+                            break
+
+                    while len(pending) >= self.batch_size and not self._is_stopped():
+                        batch = pending[:self.batch_size]
+                        pending = pending[self.batch_size:]
+                        first, last = batch[0][0], batch[-1][0]
+                        self.log(
+                            f"[TTS Pipeline] Tich luy du batch {self.batch_size} chuong ({first:04d}-{last:04d}). Bat dau tao audio..."
+                        )
+                        out_path = render_batch(
+                            engine, batch, self.out_dir, tmp_dir, progress=self.progress, should_stop=self._is_stopped
+                        )
+                        if out_path:
+                            self.created_files.append(out_path)
+                            last_done = max(last_done, last)
+                            self.log(f"[TTS Pipeline] -> DA TAO XONG AUDIO BATCH: {os.path.basename(out_path)}")
+
+                # Process any remaining chapters when crawler finishes
+                if pending and not self._is_stopped():
+                    first, last = pending[0][0], pending[-1][0]
+                    self.log(f"[TTS Pipeline] Xu ly batch cuoi cung ({len(pending)} chuong, {first:04d}-{last:04d})...")
+                    out_path = render_batch(
+                        engine, pending, self.out_dir, tmp_dir, progress=self.progress, should_stop=self._is_stopped
+                    )
+                    if out_path:
+                        self.created_files.append(out_path)
+                        self.log(f"[TTS Pipeline] -> DA TAO XONG AUDIO BATCH CUOI: {os.path.basename(out_path)}")
+
+        except Cancelled:
+            self.log("[TTS Pipeline] Da dung theo yeu cau.")
+        except Exception as exc:
+            self.error = exc
+            self.log(f"[TTS Pipeline LOI] {exc}")
+            LOG.exception("Loi trong TTS Pipeline worker: %s", exc)
+        finally:
+            if engine:
+                engine.close()
+            self.log(f"[TTS Pipeline] Hoan tat tien trinh audio. Tong so file audio da tao: {len(self.created_files)}")
+
+
 def convert_chapters(
     engine_key: str,
     src_dir: str,
@@ -580,11 +776,7 @@ def convert_chapters(
     progress=None,
     should_stop=None,
 ) -> list[str]:
-    """Render chapters to audio, ``group_size`` chapters per output file. Returns output paths.
-
-    Chapters already covered by files in ``out_dir`` (named ``AAAA-BBBB_<engine>.mp3``) are
-    skipped, so each run continues with the chapters after the last converted one.
-    """
+    """Render chapters to audio, ``group_size`` chapters per output file. Returns output paths."""
     if group_size < 1:
         raise ValueError("So chuong moi file phai >= 1.")
     report = progress or (lambda d, t, m: None)
@@ -609,66 +801,17 @@ def convert_chapters(
 
     groups = [chapters[i:i + group_size] for i in range(0, len(chapters), group_size)]
     outputs: list[str] = []
-    done_chapters = 0
-    last_error = None
-    total = len(chapters)
     try:
         with tempfile.TemporaryDirectory(prefix="novel_tts_") as tmp:
             for group in groups:
                 if stopped():
                     break
-                first, last = group[0][0], group[-1][0]
-                chapter_wavs: list[str] = []
-                for idx, path in group:
-                    if stopped():
-                        raise Cancelled
-                    with open(path, encoding="utf-8") as f:
-                        text = f.read()
-                    chunks = split_text(text, engine.max_chars, engine.merge_chunks)
-                    chunk_wavs = []
-                    for n, chunk in enumerate(chunks):
-                        if stopped():
-                            raise Cancelled
-                        wp = os.path.join(tmp, f"{idx:04d}_{n:05d}.wav")
-                        try:
-                            engine.synth(chunk, wp)
-                        except (Cancelled, TTSFatal):
-                            raise
-                        except Exception as exc:  # one bad chunk must not kill the whole run
-                            last_error = exc
-                            LOG.warning("Chuong %s doan %s loi (%s), bo qua: %.40r", idx, n + 1, exc, chunk)
-                        if os.path.isfile(wp) and os.path.getsize(wp) > 44:
-                            chunk_wavs.append(wp)
-                        report(done_chapters, total, f"Chuong {idx}: doan {n + 1}/{len(chunks)}")
-                    if not chunk_wavs:
-                        LOG.warning("Chuong %s khong tao duoc audio, bo qua.", idx)
-                        continue
-                    cw = os.path.join(tmp, f"{idx:04d}.wav")
-                    _concat_wavs(chunk_wavs, cw, pause=PAUSE_SECONDS)
-                    for p in chunk_wavs:
-                        os.remove(p)
-                    chapter_wavs.append(cw)
-                    done_chapters += 1
-                    report(done_chapters, total, f"Xong chuong {idx}")
-                if not chapter_wavs:
-                    continue
-                base = os.path.join(out_dir, f"{first:04d}-{last:04d}_{engine.key}")
-                combined = os.path.join(tmp, f"{first:04d}-{last:04d}.wav")
-                _concat_wavs(chapter_wavs, combined)
-                if _wav_to_mp3(combined, base + ".mp3"):
-                    outputs.append(base + ".mp3")
-                else:
-                    LOG.warning("Chua cai lameenc (pip install lameenc) -> luu .wav thay vi .mp3.")
-                    os.replace(combined, base + ".wav")
-                    outputs.append(base + ".wav")
-                LOG.info("Da tao %s", outputs[-1])
-                for p in chapter_wavs + [combined]:
-                    if os.path.exists(p):
-                        os.remove(p)
+                out_path = render_batch(engine, group, out_dir, tmp, progress=report, should_stop=stopped)
+                if out_path:
+                    outputs.append(out_path)
+                    LOG.info("Da tao %s", outputs[-1])
     except Cancelled:
         LOG.info("Da dung TTS theo yeu cau.")
     finally:
         engine.close()
-    if not outputs and last_error is not None:
-        raise RuntimeError(f"Khong tao duoc audio nao. Loi cuoi: {last_error}")
     return outputs
